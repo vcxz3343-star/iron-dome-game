@@ -10,6 +10,36 @@ const W = 720, H = 960;
 const CITY_Y = 905;          // خط المدينة في الأسفل
 const STRIKE_COOLDOWN = 7000; // مللي ثانية
 
+// مؤثرات صوتية مولّدة بـ WebAudio (بلا ملفات خارجية)
+const SFX = {
+  ctx: null, muted: false,
+  ensure() {
+    if (!this.ctx) { try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  },
+  tone(freq, dur, type, vol, slideTo) {
+    if (this.muted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t + dur);
+    g.gain.setValueAtTime(vol || 0.08, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.ctx.destination);
+    o.start(t); o.stop(t + dur);
+  },
+  launch() { this.tone(520, 0.18, 'square', 0.045, 980); },
+  strikeLaunch() { this.tone(170, 0.45, 'sawtooth', 0.07, 720); },
+  boom(big) { this.tone(big ? 90 : 140, big ? 0.5 : 0.3, 'sawtooth', 0.11, 40); },
+  cityHit() { this.tone(70, 0.6, 'sawtooth', 0.15, 30); },
+  shieldUp() { this.tone(660, 0.28, 'sine', 0.09, 990); }
+};
+window.toggleMute = function (btn) {
+  SFX.muted = !SFX.muted;
+  btn.textContent = SFX.muted ? '🔇 الصوت: مغلق' : '🔊 الصوت: يعمل';
+};
+
 class IronDomeScene extends Phaser.Scene {
   constructor() { super('IronDome'); }
 
@@ -27,6 +57,12 @@ class IronDomeScene extends Phaser.Scene {
     this.lastSpawnAt = 0;
     this.spawnInterval = 1300;
     this.betweenWaves = false;
+    this.streak = 0;
+    this.shield = false;
+    this.blastRadius = 58;
+    this.interceptorSpeed = 720;
+    this.best = 0;
+    try { this.best = parseInt(localStorage.getItem('ironDomeBest') || '0', 10) || 0; } catch (e) {}
 
     this.makeTextures();
     this.drawBackground();
@@ -54,6 +90,13 @@ class IronDomeScene extends Phaser.Scene {
     // رادار دوّار — مقر المراقبة
     this.radar = this.add.image(360, 300, 'radar').setDepth(2).setAlpha(0.9);
     this.tweens.add({ targets: this.radar, angle: 360, duration: 5000, repeat: -1, ease: 'Linear' });
+
+    // قبة الدرع (تظهر عند تفعيل درع الطاقة)
+    this.shieldDome = this.add.graphics().setDepth(5).setAlpha(0);
+    this.shieldDome.lineStyle(4, 0x4dd0e1, 0.9);
+    this.shieldDome.beginPath();
+    this.shieldDome.arc(360, CITY_Y + 10, 330, Math.PI, 0, false);
+    this.shieldDome.strokePath();
 
     // نص الموجة
     this.banner = this.add.text(360, 430, '', {
@@ -99,6 +142,13 @@ class IronDomeScene extends Phaser.Scene {
     g.fillStyle(0x9e9e9e, 1); g.fillTriangle(10, 34, 2, 46, 10, 46); g.fillTriangle(22, 34, 30, 46, 22, 46);
     g.fillStyle(0xff9800, 1); g.fillTriangle(16, 52, 11, 38, 21, 38);
     g.generateTexture('rocket', 32, 54); g.destroy();
+
+    g = this.make.graphics({ x: 0, y: 0 }, false);
+    // صاروخ السرب السريع: صغير برتقالي
+    g.fillStyle(0xffccbc, 1); g.fillRect(6, 9, 9, 18);
+    g.fillStyle(0xff5722, 1); g.fillTriangle(10, 0, 4, 11, 17, 11);
+    g.fillStyle(0xff9800, 1); g.fillTriangle(10, 36, 6, 26, 15, 26);
+    g.generateTexture('rocket_fast', 21, 38); g.destroy();
 
     g = this.make.graphics({ x: 0, y: 0 }, false);
     // الصاروخ المدرّع: أكبر وأغمق
@@ -208,6 +258,8 @@ class IronDomeScene extends Phaser.Scene {
     this.launchers.forEach((L) => {
       if (!L.alive && n > 1) { L.alive = true; L.sprite.setTexture('launcher'); L.sprite.clearTint(); }
     });
+    this.blastRadius = Math.min(88, 58 + Math.floor((n - 1) / 2) * 6);
+    this.interceptorSpeed = Math.min(920, 720 + (n - 1) * 16);
     this.banner.setText('الموجة ' + n);
     this.banner.setAlpha(1);
     this.tweens.add({ targets: this.banner, alpha: 0, duration: 900, delay: 900 });
@@ -218,15 +270,23 @@ class IronDomeScene extends Phaser.Scene {
     const alive = this.launchers.filter((L) => L.alive);
     if (!alive.length) return;
     const L = Phaser.Utils.Array.GetRandom(alive);
-    const armored = this.wave >= 2 && Math.random() < 0.18;
-    const r = this.add.image(L.x, L.y + 26, armored ? 'rocket_armored' : 'rocket').setDepth(6);
+    const roll = Math.random();
+    const kind = (this.wave >= 3 && roll < 0.22) ? 'fast'
+               : (this.wave >= 2 && roll < 0.40) ? 'armored' : 'normal';
+    const tex = kind === 'fast' ? 'rocket_fast' : kind === 'armored' ? 'rocket_armored' : 'rocket';
+    const r = this.add.image(L.x, L.y + 26, tex).setDepth(6);
     const tx = Phaser.Math.Between(40, W - 40);
     const dx = tx - r.x, dy = CITY_Y - r.y;
     const len = Math.hypot(dx, dy) || 1;
-    const speed = (armored ? 105 : 145) + this.wave * 11 + Phaser.Math.Between(0, 35);
+    const base = kind === 'fast' ? 235 : kind === 'armored' ? 105 : 145;
+    const speed = base + this.wave * 11 + Phaser.Math.Between(0, 35);
     r.setData({
       vx: (dx / len) * speed, vy: (dy / len) * speed,
-      tx: tx, hp: armored ? 2 : 1, armored: armored, trailAt: 0
+      tx: tx, trailAt: 0, kind: kind,
+      hp: kind === 'armored' ? 2 : 1,
+      armored: kind === 'armored',
+      dmg: kind === 'fast' ? 5 : kind === 'armored' ? 16 : 10,
+      scoreVal: kind === 'fast' ? 15 : kind === 'armored' ? 40 : 20
     });
     r.rotation = Math.atan2(dy, dx) + Math.PI / 2;
     this.rockets.add(r);
@@ -243,6 +303,7 @@ class IronDomeScene extends Phaser.Scene {
   }
 
   onTap(p) {
+    SFX.ensure();
     if (this.gameOver) { this.scene.restart(); return; }
     const wx = p.worldX, wy = p.worldY;
 
@@ -269,7 +330,8 @@ class IronDomeScene extends Phaser.Scene {
     this.lastShotAt = now;
     const b = this.nearestBattery(tx, ty);
     const s = this.add.image(b.x, b.y - 20, 'interceptor').setDepth(7);
-    s.setData({ target: targetRocket || null, tx: tx, ty: ty, speed: 720, born: now });
+    s.setData({ target: targetRocket || null, tx: tx, ty: ty, speed: this.interceptorSpeed, born: now });
+    SFX.launch();
     this.interceptors.add(s);
     this.flash(b.x, b.y - 26, 0x6ee7ff, 10);
   }
@@ -286,6 +348,7 @@ class IronDomeScene extends Phaser.Scene {
     const s = this.add.image(360, 800, 'strike').setDepth(7).setScale(1.05);
     s.setData({ target: L, tx: L.x, ty: L.y, speed: 560 });
     this.strikes.add(s);
+    SFX.strikeLaunch();
     this.pushHQ();
   }
 
@@ -295,6 +358,16 @@ class IronDomeScene extends Phaser.Scene {
   }
 
   explode(x, y, radius, damage) {
+    if (damage > 0 || radius > 60) SFX.boom(radius > 60);
+    // جسيمات انفجار حقيقية (Phaser Particles)
+    try {
+      const p = this.add.particles(x, y, 'dot', {
+        speed: { min: 60, max: 280 }, lifespan: 480, quantity: 16,
+        scale: { start: 1.5, end: 0 }, tint: [0xffb300, 0xff7043, 0xffffff], emitting: false
+      }).setDepth(18);
+      p.explode(16, x, y);
+      this.time.delayedCall(650, () => p.destroy());
+    } catch (e) {}
     const c = this.add.circle(x, y, radius, 0xffb300, 0.5).setDepth(16);
     const core = this.add.circle(x, y, radius * 0.45, 0xffffff, 0.9).setDepth(17);
     this.tweens.add({
@@ -309,8 +382,17 @@ class IronDomeScene extends Phaser.Scene {
     victims.forEach((r) => {
       const hp = r.getData('hp') - damage;
       if (hp <= 0) {
-        this.score += r.getData('armored') ? 40 : 20;
+        this.score += r.getData('scoreVal') || 20;
         this.intercepted++;
+        this.streak++;
+        if (this.streak >= 10 && !this.shield) {
+          this.shield = true; this.streak = 0;
+          this.shieldDome.setAlpha(0.85);
+          SFX.shieldUp();
+          this.banner.setText('🛡️ درع الطاقة مفعّل!');
+          this.banner.setAlpha(1);
+          this.tweens.add({ targets: this.banner, alpha: 0, duration: 800, delay: 800 });
+        }
         r.destroy();
       } else {
         r.setData('hp', hp); r.setTint(0xffccbc);
@@ -320,8 +402,19 @@ class IronDomeScene extends Phaser.Scene {
   }
 
   cityHit(r) {
-    const dmg = r.getData('armored') ? 16 : 10;
+    if (this.shield) {
+      this.shield = false;
+      this.shieldDome.setAlpha(0);
+      this.explode(r.x, CITY_Y - 20, 52, 0);
+      SFX.shieldUp();
+      r.destroy();
+      this.pushHQ();
+      return;
+    }
+    this.streak = 0;
+    const dmg = r.getData('dmg') || 10;
     this.cityHP -= dmg;
+    SFX.cityHit();
     this.explode(r.x, CITY_Y - 6, 42, 0);
     this.cameras.main.shake(180, 0.008);
     r.destroy();
@@ -331,12 +424,17 @@ class IronDomeScene extends Phaser.Scene {
 
   endGame() {
     this.gameOver = true;
+    if (this.score > this.best) {
+      this.best = this.score;
+      try { localStorage.setItem('ironDomeBest', String(this.best)); } catch (e) {}
+    }
+    this.pushHQ();
     const bg = this.add.rectangle(360, 480, 620, 340, 0x000000, 0.78).setDepth(30);
     const t1 = this.add.text(360, 400, 'سقطت المدينة!', {
       fontFamily: 'Tahoma, Arial', fontSize: '46px', fontStyle: 'bold', color: '#ff5252'
     }).setOrigin(0.5).setDepth(31);
     const t2 = this.add.text(360, 465,
-      'النقاط: ' + this.score + '   •   الموجة: ' + this.wave + '\nاعتراضات ناجحة: ' + this.intercepted + '\n\nاضغط في أي مكان لإعادة اللعب', {
+      'النقاط: ' + this.score + '   •   الموجة: ' + this.wave + '\nاعتراضات ناجحة: ' + this.intercepted + '   •   الأفضل: ' + this.best + '\n\nاضغط في أي مكان لإعادة اللعب', {
       fontFamily: 'Tahoma, Arial', fontSize: '24px', color: '#ffffff', align: 'center', lineSpacing: 10
     }).setOrigin(0.5).setDepth(31);
     bg.setInteractive();
@@ -349,7 +447,8 @@ class IronDomeScene extends Phaser.Scene {
         score: this.score, wave: Math.max(1, this.wave), hp: this.cityHP,
         intercepted: this.intercepted,
         strikeReady: this.time.now >= this.strikeReadyAt,
-        strikeWait: Math.max(0, (this.strikeReadyAt - this.time.now) / 1000)
+        strikeWait: Math.max(0, (this.strikeReadyAt - this.time.now) / 1000),
+        best: this.best, shield: this.shield, streak: this.streak
       });
     }
   }
@@ -407,7 +506,7 @@ class IronDomeScene extends Phaser.Scene {
       if (time - s.getData('born') > 2600) spentI.push(s);
     });
     spentI.forEach((s) => {
-      this.explode(s.getData('boomX') ?? s.x, s.getData('boomY') ?? s.y, 58, 1);
+      this.explode(s.getData('boomX') ?? s.x, s.getData('boomY') ?? s.y, this.blastRadius, 1);
       s.destroy();
     });
 

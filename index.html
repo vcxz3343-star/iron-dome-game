@@ -17,6 +17,8 @@
   .stat .l { font-size:11px; color:#8e9fc0; }
   #hpwrap { height:10px; background:#233; border-radius:6px; margin-top:8px; overflow:hidden; }
   #hpbar { height:100%; width:100%; background:linear-gradient(90deg,#37d67a,#a6e34d); transition:width .3s; }
+  #shield { margin-top:8px; font-size:12px; text-align:center; padding:6px; border-radius:8px; background:#1a2340; color:#9fb0cc; }
+  #shield.on { background:#0f3d4d; color:#4de3ff; font-weight:700; }
   #strike { margin-top:8px; font-size:12px; text-align:center; padding:6px; border-radius:8px; background:#12263f; color:#6ee7ff; }
   #strike.ready { background:#0f3d2e; color:#4dff9d; font-weight:700; }
   .btns { display:flex; gap:8px; margin-top:8px; }
@@ -43,11 +45,14 @@
     <div class="stat"><div class="v" id="wave">1</div><div class="l">الموجة</div></div>
     <div class="stat"><div class="v" id="intercepted">0</div><div class="l">اعتراض ناجح</div></div>
     <div class="stat"><div class="v" id="hp">100</div><div class="l">سلامة المدينة %</div></div>
+    <div class="stat"><div class="v" id="best">0</div><div class="l">أفضل نتيجة</div></div>
   </div>
   <div id="hpwrap"><div id="hpbar"></div></div>
+  <div id="shield">🛡️ الدرع: غير مفعّل — ١٠ اعتراضات متتالية بلا إصابة تفعّله</div>
   <div id="strike" class="ready">🎯 الضربة المضادة جاهزة — اضغط أي منصة إطلاق معادية</div>
   <div class="btns">
     <button id="pauseBtn">⏸️ إيقاف مؤقت</button>
+    <button id="muteBtn">🔊 الصوت: يعمل</button>
     <button id="restartBtn">🔄 إعادة اللعب</button>
   </div>
 </div>
@@ -57,7 +62,7 @@
 <div class="hint">
   <b>🎯 الاعتراض:</b> اضغط أي صاروخ قادم (أو قربه) فتنطلق صواريخ القبة من أقرب بطارية وتعترضه في السماء.<br>
   <span class="red">🚀 الضربة المضادة:</span> اضغط منصة إطلاق العدو في الأعلى لتدميرها بصاروخ بعيد — تحتاج ٧ ثوانٍ لإعادة التجهيز.<br>
-  لا تدع الصواريخ تصل إلى المدينة في الأسفل!
+  من الموجة ٣ تهاجم صواريخ سرب سريعة، وكل ١٠ اعتراضات متتالية تمنحك درع طاقة يصدّ ضربة كاملة. لا تدع الصواريخ تصل إلى المدينة!
 </div>
 
 <script>
@@ -67,12 +72,19 @@
     document.getElementById('intercepted').textContent = s.intercepted;
     document.getElementById('hp').textContent = Math.max(0, Math.round(s.hp));
     document.getElementById('hpbar').style.width = Math.max(0, s.hp) + '%';
+    document.getElementById('best').textContent = s.best || 0;
+    var sh = document.getElementById('shield');
+    if (s.shield) { sh.className = 'on'; sh.textContent = '🛡️ درع الطاقة مفعّل — يصدّ الضربة القادمة!'; }
+    else { sh.className = ''; sh.textContent = '🛡️ الدرع: ' + (s.streak || 0) + '/١٠ اعتراضات متتالية لتفعيله'; }
     var st = document.getElementById('strike');
     if (s.strikeReady) { st.className = 'ready'; st.textContent = '🎯 الضربة المضادة جاهزة — اضغط أي منصة إطلاق معادية'; }
     else { st.className = ''; st.textContent = '⏳ إعادة تجهيز الضربة المضادة… ' + Math.ceil(s.strikeWait) + ' ث'; }
   };
   document.getElementById('pauseBtn').addEventListener('click', function () {
     if (window.gameControl) window.gameControl.togglePause(this);
+  });
+  document.getElementById('muteBtn').addEventListener('click', function () {
+    if (window.toggleMute) window.toggleMute(this);
   });
   document.getElementById('restartBtn').addEventListener('click', function () {
     if (window.gameControl) window.gameControl.restart();
